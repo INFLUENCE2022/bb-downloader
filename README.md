@@ -59,6 +59,8 @@ python bb_crawler.py --dry-run           # list courses + term mapping, download
 python bb_crawler.py                     # download everything (skips finished courses)
 python bb_crawler.py --course _12345_1   # one course only (repeatable)
 python bb_crawler.py --force             # wipe that course's folder and re-download
+python bb_crawler.py --update            # incremental: fetch only new/changed content
+python bb_crawler.py --update --dry-run  # preview what --update would fetch
 ```
 
 **Always start with `--dry-run`.** It shows which folder each course would land in
@@ -66,6 +68,79 @@ without downloading anything — the fastest way to confirm your term mapping is
 
 The first run opens a browser window and asks you to log in once. The session is then
 persisted in `profile_path`, so later runs are unattended.
+
+## Incremental updates
+
+`--update` re-walks every course and downloads only what is new or changed. It is
+designed to be run unattended on a schedule (see below).
+
+**How it decides.** Every content item in the BlackBoard tree carries a `modified`
+timestamp, and *that timestamp does move when a course is edited* — including when an
+attachment is added to or replaced on an existing item. The crawler keeps a snapshot of
+`item_id → modified` in `.content_snapshot.json` and acts on the difference:
+
+| Situation | Action |
+|---|---|
+| Item id not in the snapshot | new → download |
+| `modified` changed | changed → re-download |
+| Item's parent path changed | moved → re-download into the new location |
+| Otherwise | skip — **the item's page is never fetched**, which is where most of the time saving comes from |
+
+**Discipline that keeps it honest:**
+
+- An item is written to the snapshot **only after every one of its attachments downloaded
+  successfully**. A failure is left out on purpose, so next week retries it instead of
+  treating it as "seen, unchanged" and losing it forever.
+- If the content tree walk hits an error partway, the snapshot is **not** updated at all
+  for that course — an incomplete walk must not look like "these items disappeared".
+- The snapshot is merged, never replaced, so an item the instructor temporarily hides
+  keeps its record and is re-checked when it reappears.
+- Files whose names only the browser knows are downloaded to a temp dir first and then
+  moved onto the target name, so re-downloading a changed file **overwrites** it instead
+  of leaving a `_1` copy next to a stale original.
+
+**Known limitation.** `modified` tracks *edits to content items*. If someone overwrites a
+file directly in the course file store under the same name without touching the item, the
+timestamp does not move and the change is not detected. Detecting that would require
+re-fetching every attachment every run (the REST API exposes no size or checksum for a
+content file), which is the cost this mode exists to avoid.
+
+**First run after enabling.** If a course was already downloaded but has no snapshot yet,
+the crawler *seeds* the snapshot without downloading anything — but it still fetches
+anything modified since that course was last crawled. So the first `--update` is cheap,
+and it will not re-download an existing archive.
+
+## Running it on a schedule
+
+`scripts/run_weekly.bat` runs `--update`, appends to `logs/update.log`, and propagates a
+meaningful exit code:
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | unexpected error |
+| 2 | needs a human to log in (session expired) |
+| 3 | some downloads failed — they were **not** recorded, next run retries |
+| 4 | another instance is already running |
+
+Register it on Windows (Saturday and Sunday at 20:00):
+
+```
+schtasks /create /tn BB_WeeklyUpdate ^
+         /tr "<仓库路径>\scripts\run_weekly.bat" ^
+         /sc weekly /d SAT,SUN /st 20:00 /f
+```
+
+Two things to know about the default task settings:
+
+- The task runs as `InteractiveToken`, i.e. **only while you are logged in**. It will not
+  fire if the machine is off or asleep, and there is no catch-up. Running twice a week
+  plus the idempotent incremental logic is what covers that.
+- Set "If the task is already running, do not start a new instance". The crawler also
+  takes a `.crawl.lock` for the same reason — two instances would kill each other's
+  browser (startup kills every `msedge` holding that profile).
+
+Reports go to `reports/update_YYYY-MM-DD.md` + `reports/latest-update.md`.
 
 ## Output layout
 
@@ -80,6 +155,11 @@ persisted in `profile_path`, so later runs are unattended.
 │           ├── _外链.md                # external links, recorded not downloaded
 │           └── week 1/lectures/Lecture_1.pdf
 ├── .crawl_status.json                  # resume state (gitignored)
+├── .content_snapshot.json              # incremental-update baseline (gitignored)
+├── .crawl.lock                         # single-instance lock (gitignored)
+├── reports/
+│   ├── update_2026-01-01.md            # per-run incremental report
+│   └── latest-update.md                # shortcut to the newest one
 ├── configs/paths.json                  # your config (gitignored)
 └── .edge_profile/                      # browser profile (gitignored)
 ```

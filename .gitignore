@@ -10,8 +10,14 @@
 
 # 运行状态与日志
 .crawl_status.json
+.content_snapshot.json
+.content_snapshot.json.tmp
+.tmp_dl/
 logs/
 *.log
+
+# 增量更新报告（含课程名，属个人信息）
+reports/
 
 # 本地真实配置（含自己学校的 base_url / 学期 ID，不入库）
 # 提交的是同目录下的 *.example.json 模板
