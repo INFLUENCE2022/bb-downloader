@@ -59,6 +59,7 @@ python bb_crawler.py --dry-run           # list courses + term mapping, download
 python bb_crawler.py                     # download everything (skips finished courses)
 python bb_crawler.py --course _12345_1   # one course only (repeatable)
 python bb_crawler.py --force             # wipe that course's folder and re-download
+                                         # (keeps a `homework/` subfolder if you have one)
 python bb_crawler.py --update            # incremental: fetch only new/changed content
 python bb_crawler.py --update --dry-run  # preview what --update would fetch
 ```
@@ -149,6 +150,8 @@ Reports go to `reports/update_YYYY-MM-DD.md` + `reports/latest-update.md`.
 ├── 2025年下学期/                       # term folder (name comes from your term mapping)
 │   └── CS101_Introduction to Programming (2026 Fall)/
 │       ├── _作业清单.md                # assignment index for this course
+│       ├── homework/                   # your own work (never downloaded; see --force)
+│       │   └── Assignment1.docx
 │       ├── Assessment/
 │       │   └── assignment1.ipynb       # assignment attachments
 │       └── Materials/
@@ -211,6 +214,10 @@ The interesting parts (and the traps) are documented in
   `--dry-run` shows `未分类/`, add the new mapping.
 - **No incremental sync.** Re-running a finished course is skipped entirely; use
   `--force` to re-fetch it (which deletes and re-downloads the whole course folder).
+  A `homework/` subfolder is the one exception: it is left alone, on the assumption
+  that anything you put in there is yours and not something the crawler downloaded.
+  If you keep your own files in a course folder under a different name, add that name
+  to `KEEP_ON_FORCE` near the top of `bb_crawler.py` before running `--force`.
 - **HTTP rate limits are your problem.** There is a small delay between downloads, but
   no adaptive backoff. Don't run this against instances you don't have permission to use.
 

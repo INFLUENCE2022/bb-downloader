@@ -58,7 +58,7 @@ profile 的进程。
 python bb_crawler.py --dry-run           # 只列课程与学期映射，不下载任何文件
 python bb_crawler.py                     # 全量下载（自动跳过已完成的课）
 python bb_crawler.py --course _12345_1   # 只跑一门课（可重复指定）
-python bb_crawler.py --force             # 清空该课目录后重新下载
+python bb_crawler.py --force             # 清空该课目录后重新下载（保留 homework/ 子目录）
 python bb_crawler.py --update            # 增量：只下载新增/被修改的内容
 python bb_crawler.py --update --dry-run  # 预览 --update 会下载什么
 ```
@@ -136,6 +136,8 @@ schtasks /create /tn BB_WeeklyUpdate ^
 ├── 2025年下学期/                       # 学期文件夹（名字由学期映射决定）
 │   └── CS101_程序设计基础 (2026 Fall)/
 │       ├── _作业清单.md                # 该课的作业索引
+│       ├── homework/                   # 你自己的作业答案（爬虫不管，--force 也不删）
+│       │   └── Assignment1.docx
 │       ├── Assessment/
 │       │   └── assignment1.ipynb       # 作业附件
 │       └── Materials/
@@ -193,6 +195,9 @@ schtasks /create /tn BB_WeeklyUpdate ^
 - **学期自动映射是机构相关的** —— 见上。
 - **新学期要补配置**。新学年意味着新的 term ID；`--dry-run` 出现 `未分类/` 就说明该补了。
 - **没有增量同步**。已完成的课会整门跳过；要重取用 `--force`（会删掉并重下整个课程文件夹）。
+  唯一的例外是 `homework/` 子目录：它会被保留，因为默认假设放进那里的是你自己的东西、
+  不是爬虫下的。如果你习惯用别的目录名放自己的文件，`--force` 之前先把那个名字加进
+  `bb_crawler.py` 顶部的 `KEEP_ON_FORCE`。
 - **限流要自己把握**。下载之间有短延时，但没有自适应退避。不要对没有授权的实例运行。
 
 ## 排错

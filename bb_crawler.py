@@ -53,6 +53,10 @@ REPORT_DIR = BASE / 'reports'
 TMP_DL_DIR = BASE / '.tmp_dl'  # 文件名未知时的中转下载目录（下完立刻挪走）
 LOCK_PATH = BASE / '.crawl.lock'  # 单实例锁
 
+# --force 清空课程目录时保留下来的子目录名。这些是用户自己放进去的内容
+# （作业答案、笔记等），爬虫不认识，删掉就找不回来了。
+KEEP_ON_FORCE = {'homework'}
+
 # BB 内容条目类型（contentHandler.id 去掉前缀）
 H_FOLDER = 'resource/x-bb-folder'
 H_FILE = 'resource/x-bb-file'
@@ -486,11 +490,19 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
 
     # --force 必须先清空本课目录：否则浏览器下载遇到同名会加 _1/_2 后缀，留下重复副本。
     # 只允许删 download_root 之下的目录，防误删。
+    # KEEP_ON_FORCE 里的目录是用户自己放进去的东西（作业答案等），爬虫不认识，一律保留。
     if force and dest_root.exists():
         root = (BASE / cfg['download_root']).resolve()
         if root in dest_root.parents:
             log(f'     [--force] 清空旧目录重下: {dest_root.name}')
-            shutil.rmtree(dest_root, ignore_errors=True)
+            for child in dest_root.iterdir():
+                if child.is_dir() and child.name in KEEP_ON_FORCE:
+                    log(f'       (保留 {child.name}/)')
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
         else:
             log(f'     [warn] 拒绝清空 {dest_root}（不在下载根目录下）')
 
