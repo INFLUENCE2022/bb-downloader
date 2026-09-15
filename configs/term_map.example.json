@@ -1,0 +1,11 @@
+{
+  "_comment": "复制成 term_map.json 后填入你自己学校的学期映射（term_map.json 已被 .gitignore 排除）。键可以是 termId，也可以是学期名字符串。未命中这里则走代码里的自动规则，自动规则识别不了时落到 未分类/ 文件夹 —— 先跑 --dry-run，看输出的学期映射对不对，不对就在这个文件里手工覆盖。",
+
+  "_how_to_find_term_ids": "跑一次 `python bb_crawler.py --dry-run`，输出里每门课后面会带 (term=学期名)。termId 可从 .crawl_status.json 或浏览器 Network 面板的 /learn/api/public/v1/users/me/courses 响应里看到。",
+
+  "_auto_rule_note": "内置自动规则针对 'YY+T+0' 格式的学期名（如 9910 = 2099-00 学年 Term 1）：T=1 映射为 <起始年>年下学期，T=2 映射为 <起始年+1>年上学期，T=5 映射为 <起始年+1>年夏季学期。这是某类学校系统的命名习惯，不一定适用于你的学校。",
+
+  "by_term_id": {},
+
+  "by_term_name": {}
+}

@@ -1,0 +1,5 @@
+# Pinned to a beta on purpose: the crawler uses disable_pdf_preview() and
+# download.by_browser(), which are 4.2+ APIs. There is no stable 4.2+ release on
+# PyPI, so `pip install "DrissionPage>=4.2"` fails with "No matching distribution".
+# 4.2.0b20 is the version this tool was developed and verified against.
+DrissionPage==4.2.0b20

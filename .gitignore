@@ -1,0 +1,23 @@
+# 浏览器 profile（缓存巨大，含登录态，绝不入库）
+.edge_profile/
+
+# 下载产物（学期文件夹，如 2025年下学期/）
+# 命名规则：<4位年份>年<上|下|夏季>学期
+*年下学期/
+*年上学期/
+*年夏季学期/
+未分类/
+
+# 运行状态与日志
+.crawl_status.json
+logs/
+*.log
+
+# 本地真实配置（含自己学校的 base_url / 学期 ID，不入库）
+# 提交的是同目录下的 *.example.json 模板
+configs/paths.json
+configs/term_map.json
+
+# Python
+__pycache__/
+*.pyc

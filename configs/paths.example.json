@@ -1,0 +1,10 @@
+{
+  "base_url": "https://bb.your-university.edu",
+  "browser_path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "profile_path": ".edge_profile",
+  "port": 9333,
+  "download_root": ".",
+  "login_timeout": 240,
+
+  "_comment": "复制成 paths.json 后按需修改（paths.json 已被 .gitignore 排除）。base_url 填你学校的 BlackBoard 地址。browser_path 是 Edge 可执行文件路径：Windows 默认在 Program Files (x86) 或 Program Files 下；macOS 填 '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'。profile_path 是独立浏览器 profile 目录（存登录态，别指向你日常用的浏览器 profile）。download_root 相对项目根目录，'.' 表示学期文件夹直接放在项目根下。"
+}
