@@ -429,8 +429,9 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
             dest = dest / part
 
         if handler == H_FOLDER:
+            # 建文件夹自己的那一层（entry['path'] 只是父路径，不含自身）
             if not dry_run:
-                dest.mkdir(parents=True, exist_ok=True)
+                (dest / safe(title)).mkdir(parents=True, exist_ok=True)
             continue
 
         if handler == H_EXTLINK:
