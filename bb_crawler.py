@@ -736,15 +736,21 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
     if force and dest_root.exists():
         root = (BASE / cfg['download_root']).resolve()
         if root in dest_root.parents:
-            log(f'     [--force] 清空旧目录重下: {dest_root.name}')
-            for child in dest_root.iterdir():
-                if child.is_dir() and child.name in KEEP_ON_FORCE:
-                    log(f'       (保留 {child.name}/)')
-                    continue
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink(missing_ok=True)
+            if dry_run:
+                # 删目录这一步绝不能跑在 dry-run 里：--dry-run 的承诺是「一个字节都不落盘」，
+                # 而这里删的恰恰是用户自己放进课程文件夹的东西（实测踩到过）。
+                log(f'     [--force] 预览：本次会先清空 {dest_root.name}/ 再重下'
+                    f'（dry-run 不动盘）')
+            else:
+                log(f'     [--force] 清空旧目录重下: {dest_root.name}')
+                for child in dest_root.iterdir():
+                    if child.is_dir() and child.name in KEEP_ON_FORCE:
+                        log(f'       (保留 {child.name}/)')
+                        continue
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
         else:
             log(f'     [warn] 拒绝清空 {dest_root}（不在下载根目录下）')
 

@@ -58,7 +58,7 @@ processes holding it on startup.
 python bb_crawler.py --dry-run           # list courses + term mapping, download nothing
 python bb_crawler.py                     # download everything (skips finished courses)
 python bb_crawler.py --course _12345_1   # one course only (repeatable)
-python bb_crawler.py --force             # wipe that course's folder and re-download
+python bb_crawler.py --force             # wipe and re-download — every course in the run
                                          # (keeps a `homework/` subfolder if you have one)
 python bb_crawler.py --update            # incremental: fetch only new/changed content
 python bb_crawler.py --update --dry-run  # preview what --update would fetch

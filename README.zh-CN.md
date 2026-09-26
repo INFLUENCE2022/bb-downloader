@@ -58,7 +58,7 @@ profile 的进程。
 python bb_crawler.py --dry-run           # 只列课程与学期映射，不下载任何文件
 python bb_crawler.py                     # 全量下载（自动跳过已完成的课）
 python bb_crawler.py --course _12345_1   # 只跑一门课（可重复指定）
-python bb_crawler.py --force             # 清空该课目录后重新下载（保留 homework/ 子目录）
+python bb_crawler.py --force             # 清空后重下 —— 本次计划里的**每一门**课（保留 homework/）
 python bb_crawler.py --update            # 增量：只下载新增/被修改的内容
 python bb_crawler.py --update --dry-run  # 预览 --update 会下载什么
 python bb_crawler.py --select            # 勾选要下载哪些课程
