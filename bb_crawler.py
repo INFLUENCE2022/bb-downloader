@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 
 # Windows GBK 终端统一 UTF-8 输出，避免中文乱码
@@ -56,6 +57,19 @@ LOCK_PATH = BASE / '.crawl.lock'  # 单实例锁
 # --force 清空课程目录时保留下来的子目录名。这些是用户自己放进去的内容
 # （作业答案、笔记等），爬虫不认识，删掉就找不回来了。
 KEEP_ON_FORCE = {'homework'}
+
+# --clean-profile 删掉的浏览器垃圾。登录态只在 Default/Network/Cookies、
+# Local State、Default/Preferences 三处，这些都不在表里。实测一个用了两周的
+# profile 是 612 MB，其中 471 MB 出自这里（component_crx_cache 和
+# ProvenanceData 两项就占 371 MB）。
+PROFILE_JUNK = (
+    'component_crx_cache', 'ProvenanceData', 'BrowserMetrics',
+    'BrowserMetrics-spare.pma', 'GrShaderCache', 'ShaderCache',
+    'Edge Entity Extraction', 'Edge Wallet', 'Edge Shopping',
+    'Subresource Filter', 'OptimizationGuidePredictionModels',
+    'Default/Cache', 'Default/Code Cache', 'Default/GPUCache',
+    'Default/Service Worker/CacheStorage',
+)
 
 # BB 内容条目类型（contentHandler.id 去掉前缀）
 H_FOLDER = 'resource/x-bb-folder'
@@ -135,6 +149,37 @@ def wait_port_free(port: int, timeout: float = 10.0) -> None:
         if not port_is_using('127.0.0.1', port):
             return
         time.sleep(0.5)
+
+
+def dir_size(path: Path) -> int:
+    total = 0
+    for p in path.rglob('*'):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def clean_profile(cfg: dict) -> None:
+    """删掉 profile 里的浏览器垃圾，保留登录态。只在浏览器没运行时调用。"""
+    profile = (BASE / cfg['profile_path']).resolve()
+    if not profile.is_dir():
+        log(f'[profile] 不存在，跳过: {profile}')
+        return
+    before = dir_size(profile)
+    for rel in PROFILE_JUNK:
+        target = profile / rel
+        try:
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            elif target.exists():
+                target.unlink()
+        except Exception as e:
+            log(f'    [warn] 清理 {rel} 失败: {e}')
+    log(f'[profile] {before / 1048576:.0f} MB → {dir_size(profile) / 1048576:.0f} MB'
+        f'（登录态文件未动）')
 
 
 def launch(cfg: dict) -> ChromiumPage:
@@ -217,11 +262,18 @@ def is_logged_in(page: ChromiumPage) -> bool:
 def ensure_logged_in(page: ChromiumPage, base_url: str, timeout: float = 240) -> None:
     """打开 BB 首页；未登录则点 LOGIN 触发 ADFS SSO，等人手动登录完成。"""
     page.get(base_url + '/')
-    time.sleep(3)
-    if is_logged_in(page):
-        log('[登录] 已登录（profile 登录态持久化生效）')
-        return
-    log(f'[登录] 未登录 —— 请在打开的浏览器窗口里完成 {base_url} 的登录，最多等 '
+    # BB 首页是一串跳转，页面刚打开就探测会拿到「未登录」的假象：连续两次运行
+    # 都误报了一次「请人工登录」，5 秒后又是登录成功。这条消息本来是
+    # 唯一需要人工介入的信号，天天误报等于没有信号。先给它几次机会收敛。
+    res = None
+    for _ in range(4):
+        time.sleep(3)
+        res = api_fetch(page, '/learn/api/public/v1/users/me', timeout=10)
+        if res and res.get('status') == 200:
+            log('[登录] 已登录（profile 登录态持久化生效）')
+            return
+    log(f'[登录] 未登录（探测返回 {res.get("status") if res else "无响应"}）'
+        f' —— 请在打开的浏览器窗口里完成 {base_url} 的登录，最多等 '
         f'{int(timeout)} 秒')
     for sel in ("css:input[name='login']", 'css:a[href*="login"]'):
         btn = page.ele(sel, timeout=3)
@@ -311,36 +363,51 @@ def walk_course_tree(page: ChromiumPage, course_id: str) -> tuple[list[dict], in
     failed = [0]
 
     def recurse(parent_id: str | None, path: list[str], depth: int = 0) -> None:
-        url = (f'{base}/{parent_id}/children?limit=200' if parent_id
-               else f'{base}?limit=200')
-        data = api_json(page, url)
-        if data is None:
-            failed[0] += 1
-            log(f'    [warn] 取内容失败: {"/".join(path) or "(根)"}')
-            return
-        for item in data.get('results') or []:
+        # 必须翻页：一层超过 200 个条目时只取第一页会静默丢条目，而且 walk_failed
+        # 仍是 0、快照照常提交 —— 那些条目以后每周都看不见，永远不下。
+        offset, items = 0, []
+        while True:
+            url = (f'{base}/{parent_id}/children?limit=200&offset={offset}'
+                   if parent_id else f'{base}?limit=200&offset={offset}')
+            data = api_json(page, url)
+            if data is None:
+                failed[0] += 1
+                log(f'    [warn] 取内容失败: {"/".join(path) or "(根)"}')
+                return
+            items.extend(data.get('results') or [])
+            if not (data.get('paging') or {}).get('nextPage'):
+                break
+            offset += 200
+        for item in items:
             title = (item.get('title') or '').strip()
             handler = ((item.get('contentHandler') or {}).get('id')) or ''
             entry = {'item': item, 'path': path, 'title': title,
                      'handler': handler, 'id': item.get('id')}
             flat.append(entry)
-            if item.get('hasChildren') and depth < 12:
-                recurse(item.get('id'), path + [title], depth + 1)
+            if item.get('hasChildren'):
+                if depth < 12:
+                    recurse(item.get('id'), path + [title], depth + 1)
+                else:
+                    # 截断必须留痕，否则快照里会留下「这层没东西」的假象
+                    log(f'    [warn] 目录层级超过 {depth} 层，以下未遍历: '
+                        f'{"/".join(path + [title])}')
 
     recurse(None, [])
     return flat, failed[0]
 
 
 def resolve_download_urls(page: ChromiumPage, base_url: str, course_id: str,
-                          content_id: str) -> list[str]:
+                          content_id: str) -> list[str] | None:
     """从 displayIndividualContent 包装页里抠出该条目的 /bbcswebdav 下载地址。
 
     只保留 pid 与条目 id 数字段一致的链接，避免误收同页其他附件。
+    返回 None 表示这次请求没成功（会话过期/超时），返回 [] 表示请求成功但该条目
+    本来就没有附件。两者绝不能折叠成同一个值。
     """
     html = api_text(page, f'/webapps/blackboard/execute/displayIndividualContent'
                           f'?course_id={course_id}&content_id={content_id}')
-    if not html:
-        return []
+    if html is None:
+        return None
     want = content_id.strip('_').split('_')[0]
     urls, seen = [], set()
     for pid, rid in RE_WEBDav.findall(html):
@@ -353,39 +420,77 @@ def resolve_download_urls(page: ChromiumPage, base_url: str, course_id: str,
     return urls
 
 
+class _BodyText(HTMLParser):
+    """从 BB 的 displayIndividualContent 页面里抠出正文文本。
+
+    不能用正则。正文容器里嵌着别的 div，非贪婪匹配在第一个内层 </div> 就截断，
+    结果只抓到页面标题栏 —— 实测正文型条目的内容（回放链接、附件说明之类）被整条丢掉。
+    按标签配对深度取才对。
+    """
+
+    # 自闭合标签：HTMLParser 的 handle_startendtag 会各调一次 start/end，
+    # 不在 endtag 里跳过它们的话，深度会被每个 <br>/<img>/<input> 扣掉一层。
+    VOID = {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
+            'meta', 'param', 'source', 'track', 'wbr'}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.depth = 0      # 进入正文容器后的嵌套深度，0 = 还没进去 / 已经出来
+        self.skip = 0       # script/style 的嵌套深度
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if self.depth and tag in ('script', 'style'):
+            self.skip += 1
+            return
+        if tag in self.VOID:
+            return
+        if self.depth:
+            self.depth += 1
+        elif dict(attrs).get('id') in ('content', 'containerdiv'):
+            self.depth = 1
+
+    def handle_endtag(self, tag):
+        if tag in self.VOID:
+            return
+        if self.skip:
+            self.skip -= 1
+            return
+        if self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if self.depth and not self.skip:
+            t = data.strip()
+            if t:
+                self.parts.append(t)
+
+
 def item_page_text(page: ChromiumPage, course_id: str, content_id: str) -> str:
-    """取条目页正文（作业说明等），剥掉 JS 噪音。"""
+    """取条目页正文（作业说明、正文型条目的内容等）。"""
     html = api_text(page, f'/webapps/blackboard/execute/displayIndividualContent'
                          f'?course_id={course_id}&content_id={content_id}')
-    if not html:
+    if html is None:
         return ''
-    # 去掉 <script>/<style>，其余标签剥离
-    html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.S | re.I)
-    m = re.search(r'<div[^>]*id="content"[^>]*>(.*?)</div>\s*(?:<div|</div)', html,
-                  flags=re.S | re.I)
-    body = m.group(1) if m else html
-    text = re.sub(r'<[^>]+>', ' ', body)
-    text = (text.replace('&nbsp;', ' ').replace('&amp;', '&')
-                .replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"'))
-    return re.sub(r'[ \t]{2,}', ' ', re.sub(r'\n\s*\n+', '\n', text)).strip()
+    parser = _BodyText()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception as e:
+        log(f'    [warn] 解析正文出错: {e}')
+    return re.sub(r'\s{2,}', ' ', ' '.join(parser.parts)).strip()
 
 
 # ------------------------------------------------------------------- 下载
 
-def download_file(page: ChromiumPage, url: str, dest_dir: Path, want_name: str | None,
-                  force: bool = False) -> Path | None:
-    """用浏览器下载（绕过 PDF 预览）。
+def download_file(page: ChromiumPage, url: str, dest_dir: Path) -> Path | None:
+    """用浏览器下载（绕过 PDF 预览），返回落盘路径。
 
-    命名策略：浏览器会按服务端 Content-Disposition 存成真实文件名，这对
-    document/assignment 这类 REST 不给 fileName 的条目是唯一可靠来源；
-    仅当 REST 明确给了 fileName（file 类型）时才改名对齐。
+    浏览器按服务端 Content-Disposition 存成真实文件名，这是 document/assignment
+    这类 REST 不给 fileName 的条目唯一可靠的取名来源。调用方一律让它下到临时
+    目录，校验完再挪 —— 见 download_into。
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    if want_name and not force:
-        target = dest_dir / safe(want_name)
-        if target.exists() and target.stat().st_size > 0:
-            log(f'      [跳过] 已存在 {target.name}')
-            return target
     try:
         mission = page.download.by_browser(url, save_path=str(dest_dir))
         final = mission.wait(show=False, timeout=90)
@@ -399,14 +504,6 @@ def download_file(page: ChromiumPage, url: str, dest_dir: Path, want_name: str |
     if not got.exists() or got.stat().st_size == 0:
         log(f'      [失败] 空文件: {got.name}')
         return None
-    if want_name:
-        target = dest_dir / safe(want_name)
-        if got != target:
-            if target.exists():
-                target.unlink()
-            got.rename(target)
-            got = target
-    log(f'      [完成] {got.name} ({got.stat().st_size / 1024:.0f} KB)')
     return got
 
 
@@ -425,13 +522,18 @@ def download_into(page: ChromiumPage, url: str, dest_dir: Path,
                   want_name: str | None, overwrite: bool = False) -> Path | None:
     """把文件下到 dest_dir，返回最终路径。
 
-    文件名未知（document/assignment，REST 不给 fileName）时不能直接下到目标目录：
-    浏览器遇到同名文件会自动加 _1 后缀，既留下垃圾副本，又让旧内容继续占着规范
-    文件名。所以先下到临时目录拿到服务端真名，再覆盖式挪过去。
+    一律先下到 .tmp_dl、校验内容、再挪进目标目录。两个理由：
+    文件名未知（document/assignment，REST 不给 fileName）时不能直接下到目标目录，
+    否则浏览器遇到同名文件会自动加 _1 后缀，既留下垃圾副本，又让旧内容继续占着
+    规范文件名；更要紧的是浏览器会直接写进 save_path —— 目标名和服务端名一样时，
+    一个登录页就地覆盖掉那份好的旧文件，而校验发生在覆盖之后。
     """
-    if want_name:
-        got = download_file(page, url, dest_dir, want_name, force=overwrite)
-        return got if (got and not looks_like_html(got)) else _reject(got)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if want_name and not overwrite:
+        target = dest_dir / safe(want_name)
+        if target.exists() and target.stat().st_size > 0:
+            log(f'      [跳过] 已存在 {target.name}')
+            return target
 
     TMP_DL_DIR.mkdir(parents=True, exist_ok=True)
     for stale in TMP_DL_DIR.iterdir():  # 清空，确保浏览器给出的是服务端真名
@@ -439,13 +541,12 @@ def download_into(page: ChromiumPage, url: str, dest_dir: Path,
             stale.unlink()
         except Exception:
             pass
-    got = download_file(page, url, TMP_DL_DIR, None, force=True)
+    got = download_file(page, url, TMP_DL_DIR)
     if not got:
         return None
     if looks_like_html(got):
         return _reject(got)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    target = dest_dir / got.name
+    target = dest_dir / (safe(want_name) if want_name else got.name)
     try:
         if target.exists():
             target.unlink()
@@ -453,6 +554,7 @@ def download_into(page: ChromiumPage, url: str, dest_dir: Path,
     except Exception as e:
         log(f'      [失败] 挪进目标目录出错: {e}')
         return None
+    log(f'      [完成] {target.name} ({target.stat().st_size / 1024:.0f} KB)')
     return target
 
 
@@ -538,6 +640,12 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
             return True, 'modified'
         if (prev.get('p') or '') != '/'.join(entry['path']):
             return True, 'moved'  # 老师挪了位置：id 和 modified 都没变，但镜像结构要跟上
+        # 文件型条目既没有落盘记录（f）也没有“查过了、确实没内容”（e）的标记，
+        # 说明这条记录是「种子运行」写下的：那次根本没打开包装页。种子从没验证过
+        # 磁盘现状，所以补访一次 —— 正文提取修好之前，这类条目的内容全是缺的。
+        if entry['handler'] in (H_FILE, H_DOCUMENT, H_ASSIGNMENT) \
+                and not prev.get('f') and not prev.get('e'):
+            return True, 'rescued'
         return False, 'unchanged'
 
     for entry in flat:
@@ -573,6 +681,12 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
                 # 未变化：不打开包装页、不下载，省掉每文件一次请求；沿用上次的文件名记录
                 if prev_rec and prev_rec.get('f'):
                     rec['f'] = prev_rec['f']
+                # 作业清单这里也要收集：它在下面被「整份覆写」，漏掉未变化的作业
+                # 就会把索引写成只剩变动过的那几个。
+                if handler == H_ASSIGNMENT:
+                    stat['assignments'].append({
+                        'title': title, 'path': '/'.join(rel),
+                        'attachments': assignment_count(prev_rec)})
                 stat['snapshot_items'][cid] = rec
                 continue
             if dry_run:
@@ -585,20 +699,38 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
                         'handler': handler.split('-')[-1], 'files': []})
                 continue
             urls = resolve_download_urls(page, cfg['base_url'], course_id, cid)
+            if urls is None:
+                # 请求没成功（会话过期/接口报错）。绝不能当成「这条目没附件」提交
+                # 快照 —— 那会把一次临时故障写死成「已见过、无变化」，附件永远不下。
+                stat['failed'].append(f'{"/".join(rel)}/{title} （取下载链接失败）')
+                continue
             if not urls:
-                if handler == H_ASSIGNMENT:
-                    # 作业没挂附件是正常情况，计进作业清单，不算「未识别」
+                # 请求成功、这条目本来就没有附件 —— 正常状态，可以提交快照。
+                # document 型的正文能抓就抓下来，否则内容只剩一个「未识别」标记。
+                captured = False
+                if handler in (H_DOCUMENT, H_ASSIGNMENT):
                     body = item_page_text(page, course_id, cid)
-                    stat['assignments'].append({'title': title, 'path': '/'.join(rel),
-                                                'attachments': 0})
                     if len(body) > 80:
                         dest.mkdir(parents=True, exist_ok=True)
-                        (dest / f'{safe(title)}_作业要求.md').write_text(
-                            f'# {title}\n\n{body}\n', encoding='utf-8')
-                    stat['snapshot_items'][cid] = rec  # 没附件是正常状态，可以提交
-                else:
-                    # 取不到下载链接多半是登录态过期/接口报错 —— 不提交快照，下周重试
-                    stat['unknown'].append(f'{"/".join(rel)}/{title} ({handler}) 无下载链接')
+                        md = dest / f'{safe(title)}.md'
+                        md.write_text(f'# {title}\n\n{body}\n', encoding='utf-8')
+                        rec['f'] = [md.name]
+                        stat['files'] += 1
+                        stat['bytes'] += md.stat().st_size
+                        captured = True
+                if handler == H_ASSIGNMENT:
+                    stat['assignments'].append({'title': title, 'path': '/'.join(rel),
+                                                'attachments': 0})
+                elif not captured:
+                    # 作业没附件是正常情况；document/file 既没附件又没正文才要人工看
+                    stat['unknown'].append(f'{"/".join(rel)}/{title} ({handler}) 无附件')
+                rec['n'] = 0
+                rec['e'] = 1        # 查过了、确实没有可下载的内容，别再回访
+                stat['snapshot_items'][cid] = rec
+                if should:
+                    stat['new_items'].append({
+                        'path': '/'.join(rel), 'title': title, 'kind': why,
+                        'handler': handler.split('-')[-1], 'files': rec.get('f') or []})
                 continue
             fname = ((entry['item'].get('contentHandler') or {})
                      .get('file') or {}).get('fileName')
@@ -615,9 +747,11 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
             for i, url in enumerate(urls):
                 # 只有 REST 明确给了 fileName 才改名，否则用浏览器给出的服务端真名
                 want = fname if (fname and i == 0) else None
-                # 增量判定要下的条目一律覆盖，否则会被「已存在」判重跳过、改了也不更新
-                got = download_into(page, url, dest, want,
-                                    overwrite=force or (incr is not None and should))
+                # 增量判定要下的条目一律覆盖，否则会被「已存在」判重跳过、改了也不更新。
+                # 补访（rescued）例外：它只是去补落盘记录，磁盘上已有的别再下一遍。
+                got = download_into(
+                    page, url, dest, want,
+                    overwrite=force or (incr is not None and should and why != 'rescued'))
                 if got:
                     saved.append(got.name)
                     stat['files'] += 1
@@ -630,11 +764,32 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
                 stat['failed'].append(f'{"/".join(rel)}/{title}')
                 continue
             rec['f'] = saved
+            rec['n'] = len(urls)
             stat['snapshot_items'][cid] = rec
             if should:
                 stat['new_items'].append({
                     'path': '/'.join(rel), 'title': title, 'kind': why,
                     'handler': handler.split('-')[-1], 'files': saved})
+                if why == 'moved':
+                    # 老师把条目挪了位置：新位置已经下好了，旧位置那份要清掉，
+                    # 否则镜像里长期留着一份不会再更新的副本。
+                    old_dir = dest_root.joinpath(
+                        *[safe(p) for p in (prev_rec.get('p') or '').split('/') if p])
+                    for nm in prev_rec.get('f') or []:
+                        if nm in saved:
+                            continue
+                        old = old_dir / nm
+                        try:
+                            if old.is_file():
+                                old.unlink()
+                                log(f'      [清理] 位置变更，已删旧副本 {nm}')
+                        except Exception:
+                            pass
+                    try:
+                        if old_dir.is_dir() and not any(old_dir.iterdir()):
+                            old_dir.rmdir()
+                    except Exception:
+                        pass
             continue
 
         # 其他类型：不静默丢弃，记进清单
@@ -656,8 +811,10 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
     if stat['assignments'] and not dry_run:
         lines = [f'# {name} — 作业清单', '',
                  f'> 抓取时间 {datetime.now():%Y-%m-%d %H:%M}', '']
-        for a in stat['assignments']:
-            lines.append(f'- **{a["title"]}** — `{a["path"]}/`，附件 {a["attachments"]} 个')
+        for a in sorted(stat['assignments'], key=lambda x: (x['path'], x['title'])):
+            n = a.get('attachments')
+            cnt = f'，附件 {n} 个' if isinstance(n, int) else '，附件数未知'
+            lines.append(f'- **{a["title"]}** — `{a["path"]}/`{cnt}')
         idx_dir = dest_root
         idx_dir.mkdir(parents=True, exist_ok=True)
         (idx_dir / '_作业清单.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
@@ -670,11 +827,15 @@ def download_course(page: ChromiumPage, cfg: dict, course: dict, term_folder: st
             body = '\n'.join(f'- {u}' for u in stat['unknown'])
             flag.write_text(f'# 未识别/未下载条目\n\n以下条目类型未处理，请人工确认：\n\n{body}\n',
                             encoding='utf-8')
-        elif flag.exists():
+        elif flag.exists() and not (incr or {}).get('seed_only'):
+            # 种子运行根本不打开包装页，「本轮没有未识别」是没查过的意思，
+            # 不能拿它当证据把上一轮留下的告警删掉。
             flag.unlink()
 
     stat['finished_at'] = f'{datetime.now():%Y-%m-%dT%H:%M:%S}'
     extra = f', 未识别 {len(stat["unknown"])} 条' if stat['unknown'] else ''
+    if stat['failed']:
+        extra += f', 未拿到 {len(stat["failed"])} 项(下周重试)'
     if incr is not None:
         extra += f', 新增/修改 {len(stat["new_items"])} 项'
     log(f'     完成: {stat["files"]} 文件, {stat["bytes"] / 1048576:.1f} MB{extra}')
@@ -752,6 +913,20 @@ def snapshot_item(entry: dict) -> dict:
     }
 
 
+def assignment_count(prev_rec: dict | None) -> int | None:
+    """作业的附件数，未变化时用来重写索引。
+
+    老快照里没有 n，用落盘文件数回填 —— 作业每下到一个附件就多一个文件，
+    所以文件数就是附件数。回填不出来就返回 None，索引里如实写「附件数未知」。
+    """
+    if not prev_rec:
+        return None
+    if 'n' in prev_rec:
+        return prev_rec['n']
+    files = prev_rec.get('f')
+    return len(files) if files else None
+
+
 def _pid_alive(pid: int) -> bool:
     """用 CSV 输出精确匹配 PID，避免 pid=123 被 '12345' 这种误判成存活。"""
     try:
@@ -762,20 +937,28 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _lock_holder() -> int | None:
+    """占用锁且进程还活着的 PID；没有就返回 None（含锁文件损坏）。"""
+    if not LOCK_PATH.exists():
+        return None
+    try:
+        pid = int(LOCK_PATH.read_text(encoding='utf-8').strip())
+    except Exception:
+        return None
+    return pid if _pid_alive(pid) else None
+
+
 def acquire_lock() -> None:
     """单实例锁。
 
     没人值守时两个实例撞上会互相破坏：launch() 会杀掉占用本 profile 的所有
     msedge，正在下载的那个会被拦腰砍断，留下半截文件。
     """
+    holder = _lock_holder()
+    if holder is not None:
+        log(f'[锁] 另一个实例正在运行（PID {holder}），本次退出')
+        sys.exit(4)
     if LOCK_PATH.exists():
-        try:
-            pid = int(LOCK_PATH.read_text(encoding='utf-8').strip())
-        except Exception:
-            pid = None
-        if pid and _pid_alive(pid):
-            log(f'[锁] 另一个实例正在运行（PID {pid}），本次退出')
-            sys.exit(4)
         log('[锁] 发现过期的锁文件，接管')
     LOCK_PATH.write_text(str(os.getpid()), encoding='utf-8')
 
@@ -803,41 +986,83 @@ def shift_iso_back(stamp: str, hours: int = 24) -> str:
     return (dt - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
 
 
-def write_update_report(results: list[dict]) -> Path:
-    """写增量更新报告（替代邮件通知）。results 来自各课的 stat['new_items']。"""
+def _write_report_files(text: str) -> Path:
     now = datetime.now()
-    total = sum(len(r['new']) for r in results)
-    lines = ['# BB 增量更新报告', '',
-             f'> 运行时间 {now:%Y-%m-%d %H:%M:%S}', '']
-    if total == 0:
-        lines += ['**本次没有新内容。**', '']
-    else:
-        lines += [f'**共发现 {total} 项新增/修改。**', '']
-
-    kind_cn = {'new': '新增', 'modified': '已修改', 'moved': '位置变更',
-               'seeded-new': '新增（补漏）'}
-    for r in results:
-        if not r['new'] and not r.get('failed'):
-            continue
-        lines += [f'## {r["name"]}', '']
-        for it in r['new']:
-            loc = f'{r["folder"]}/{r["name"]}'
-            if it['path']:
-                loc += f'/{it["path"]}'
-            files = it.get('files') or []
-            suffix = f' → {", ".join(files)}' if files else ''
-            lines.append(f'- **{kind_cn.get(it["kind"], it["kind"])}** '
-                         f'`{loc}/{it["title"]}`{suffix}')
-        for f_ in r.get('failed') or []:
-            lines.append(f'- ⚠️ **下载失败（下周自动重试）** `{f_}`')
-        lines.append('')
-
-    text = '\n'.join(lines) + '\n'
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     dated = REPORT_DIR / f'update_{now:%Y-%m-%d}.md'
     dated.write_text(text, encoding='utf-8')
     (REPORT_DIR / 'latest-update.md').write_text(text, encoding='utf-8')
     return dated
+
+
+def write_failure_report(reason: str) -> Path:
+    """运行没跑完时也要写报告。
+
+    以前只有正常跑完才写，登录过期时 latest-update.md 停在旧日期 ——
+    读起来像「这次没跑」，实际是「跑了、失败了」，而且会一直停在那里没人知道。
+    """
+    now = datetime.now()
+    return _write_report_files(
+        f'# BB 增量更新报告\n\n> 运行时间 {now:%Y-%m-%d %H:%M:%S}\n\n'
+        f'**⚠️ 本次运行未完成：{reason}**\n\n'
+        f'没有内容的变动被记录，下次运行会照常比对快照，不会漏。\n'
+        f'细节见 logs/update.log 与 logs/crawl_*.log。\n')
+
+
+def _report_failure(reason: str) -> None:
+    """失败报告本身绝不能再抛异常，否则会把真正的错因盖掉。"""
+    try:
+        log(f'[报告] {write_failure_report(reason)}')
+    except Exception as e:
+        log(f'    [warn] 写失败报告出错: {e}')
+
+
+def write_update_report(results: list[dict]) -> Path:
+    """写增量更新报告（替代邮件通知）。
+
+    results 每项带 'new'（新增/修改）、'failed'（本次没拿到）、'unknown'
+    （需人工确认）。三者都要写：报告只报前两者时，一个「有新条目但取不到」
+    的运行会被写成「本次没有新内容」—— 报告比没有报告更糟。
+    """
+    now = datetime.now()
+    total = sum(len(r['new']) for r in results)
+    n_fail = sum(len(r.get('failed') or []) for r in results)
+    n_unk = sum(len(r.get('unknown') or []) for r in results)
+
+    lines = ['# BB 增量更新报告', '',
+             f'> 运行时间 {now:%Y-%m-%d %H:%M:%S}', '']
+    lines.append(f'**共发现 {total} 项新增/修改。**' if total
+                 else '**本次没有新增或修改的内容。**')
+    if n_fail:
+        lines.append(f'**⚠️ {n_fail} 项本次没拿到，下周自动重试。**')
+    if n_unk:
+        lines.append(f'**❓ {n_unk} 项需人工确认。**')
+    lines.append('')
+
+    kind_cn = {'new': '新增', 'modified': '已修改', 'moved': '位置变更',
+               'seeded-new': '新增（补漏）', 'rescued': '补访'}
+    for r in results:
+        if not r['new'] and not r.get('failed') and not r.get('unknown'):
+            continue
+        lines += [f'## {r["name"]}', '']
+        # 目录按磁盘真实路径写：课程名要过 safe()（BB 里的 ':' 落盘是 '_'），
+        # 条目 title 是文件名不是目录名，照抄出来是打不开的路径。
+        base = f'{r["folder"]}/{safe(r["name"])}'
+        for it in r['new']:
+            folder = f'{base}/{it["path"]}' if it['path'] else base
+            files = it.get('files') or []
+            kind = kind_cn.get(it['kind'], it['kind'])
+            if files:
+                lines.append(f'- **{kind}** `{folder}/` → {", ".join(files)}')
+            else:
+                lines.append(f'- **{kind}** `{folder}/{safe(it["title"])}`')
+        for f_ in r.get('failed') or []:
+            lines.append(f'- ⚠️ **本次没拿到（下周自动重试）** `{f_}`')
+        for u in r.get('unknown') or []:
+            lines.append(f'- ❓ **需人工确认** `{u}`')
+        lines.append('')
+
+    return _write_report_files('\n'.join(lines) + '\n')
 
 
 # ------------------------------------------------------------------- 主流程
@@ -851,6 +1076,8 @@ def main() -> None:
                     help='清空该课目录后重新下载（避免同名文件残留成重复副本）')
     ap.add_argument('--update', action='store_true',
                     help='增量：只下载新增/被修改的内容（按 BB 的 modified 时间戳比对）')
+    ap.add_argument('--clean-profile', action='store_true',
+                    help='清掉浏览器 profile 里的缓存/遥测垃圾（保留登录态），不下载')
     args = ap.parse_args()
 
     if args.update and args.force:
@@ -859,6 +1086,12 @@ def main() -> None:
     cfg = load_config()
     term_map = load_term_map()
     init_log()
+
+    if args.clean_profile:
+        if _lock_holder() is not None:
+            raise SystemExit('[锁] 另一个实例正在运行，不清理 profile')
+        clean_profile(cfg)
+        return
 
     page = None
     status = load_status()
@@ -927,19 +1160,23 @@ def main() -> None:
                          / p['folder'] / safe(p['name']))
             if args.update:
                 sc = snap['courses'].get(p['courseId']) or {}
-                # 种子的前提是「磁盘现状即最新」。换了 download_root、目录被移走或
-                # 云盘同步挪了位置时，这个前提不成立，必须退回全量 ——
-                # 否则该课在正确位置上永远不存在，而且完全静默。
-                # 判据只看目录在不在：课程本身没有资料时目录是空的，那属于正常情况，
-                # 不能和「目录被搬走」混为一谈。
                 disk_ok = dest_root.is_dir()
-                if not sc and prev_ok and not disk_ok:
+                # 快照里记着上次落在哪个目录。download_root 被改过、学期目录被移走
+                # 或改名时，光比 modified 会把所有条目判成「没变」而永久静默停发，
+                # 唯一的信号是报告一直写「没有新内容」。所以这里必须退回全量。
+                moved_root = bool(sc.get('dest_root')) and sc['dest_root'] != str(dest_root)
+                if moved_root:
+                    log(f'     [warn] {p["name"]}: 下载目录与快照记录不一致，按全量重下\n'
+                        f'            上次 {sc["dest_root"]}\n'
+                        f'            本次 {dest_root}')
+                elif not sc and prev_ok and not disk_ok:
                     log(f'     [warn] {p["name"]}: 状态显示已完成，但磁盘上找不到文件 —— '
                         f'按全量处理（检查 download_root 是否被改过）')
                 incr = {
-                    'items': sc.get('items') or {},
+                    # moved_root 时清空 items，让全部条目走「新增」分支重下一遍
+                    'items': {} if moved_root else (sc.get('items') or {}),
                     # 有抓取记录但没快照 → 只建种子、不下东西，避免首次增量退化成全量重下
-                    'seed_only': not sc and prev_ok and disk_ok,
+                    'seed_only': (not sc) and prev_ok and disk_ok and not moved_root,
                     # 统一成 ISO 形式，好和 BB 的 modified（形如 2026-01-02T03:04:05.000Z）
                     # 做字符串比较；再往前留 24 小时安全余量吸收时区/漂移
                     'last_crawl': shift_iso_back(
@@ -953,7 +1190,8 @@ def main() -> None:
                 if args.update:
                     update_results.append({'name': p['name'], 'folder': p['folder'],
                                            'new': stat.get('new_items') or [],
-                                           'failed': stat.get('failed') or []})
+                                           'failed': stat.get('failed') or [],
+                                           'unknown': stat.get('unknown') or []})
                 if args.dry_run:
                     continue  # 预览模式：一个字节都不落盘
                 stat['ok'] = True
@@ -981,6 +1219,11 @@ def main() -> None:
                     continue
                 status['per_course'][p['courseId']] = {
                     'ok': False, 'name': p['name'], 'error': str(e)}
+                if args.update:
+                    # 整门课抛异常时也要进报告，否则报告里连这门课都不出现
+                    update_results.append({
+                        'name': p['name'], 'folder': p['folder'], 'new': [],
+                        'failed': [f'整门课失败：{e}'], 'unknown': []})
             if not args.dry_run:
                 save_status(status, len(plan_all))
 
@@ -1012,16 +1255,19 @@ def main() -> None:
         status['status'] = 'error'
         save_status(status, status.get('courses_total', 0))
         log(f'\n[需要人工登录] {e}')
+        _report_failure(f'需要人工登录。{e}')
         sys.exit(2)
     except KeyboardInterrupt:
         status['status'] = 'interrupted'
         save_status(status, status.get('courses_total', 0))
         log('\n[中断] 已保存进度，重跑将从断点继续')
+        _report_failure('被手动中断')
         sys.exit(1)
     except Exception as e:
         status['status'] = 'error'
         save_status(status, status.get('courses_total', 0))
         log(f'\n[错误] {e}')
+        _report_failure(f'{type(e).__name__}: {e}')
         sys.exit(1)
     finally:
         if page:

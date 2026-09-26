@@ -62,6 +62,7 @@ python bb_crawler.py --force             # wipe that course's folder and re-down
                                          # (keeps a `homework/` subfolder if you have one)
 python bb_crawler.py --update            # incremental: fetch only new/changed content
 python bb_crawler.py --update --dry-run  # preview what --update would fetch
+python bb_crawler.py --clean-profile     # trim the browser profile (keeps the session)
 ```
 
 **Always start with `--dry-run`.** It shows which folder each course would land in
@@ -121,7 +122,7 @@ meaningful exit code:
 | 0 | success |
 | 1 | unexpected error |
 | 2 | needs a human to log in (session expired) |
-| 3 | some downloads failed — they were **not** recorded, next run retries |
+| 3 | something was found but not retrieved — it was **not** recorded, next run retries |
 | 4 | another instance is already running |
 
 Register it on Windows (Saturday and Sunday at 20:00):
@@ -141,7 +142,20 @@ Two things to know about the default task settings:
   takes a `.crawl.lock` for the same reason — two instances would kill each other's
   browser (startup kills every `msedge` holding that profile).
 
-Reports go to `reports/update_YYYY-MM-DD.md` + `reports/latest-update.md`.
+Reports go to `reports/update_YYYY-MM-DD.md` + `reports/latest-update.md`, and a report
+is written on **every** run — including the ones that end at exit code 2/1. A report that
+is absent or stale means the task never started, not that nothing changed. Each entry is
+one of:
+
+| Mark | Meaning |
+|---|---|
+| 新增 / 已修改 / 位置变更 | fetched and written to disk |
+| 补访 | re-visited to backfill a missing on-disk record (see `--update` notes) |
+| ⚠️ 本次没拿到 | found but not retrieved; **not** recorded, so the next run retries |
+| ❓ 需人工确认 | an item with no downloadable attachment and no body text |
+
+The ⚠️ rows are the ones that matter: they are the only case where the crawler knows it
+is missing something.
 
 ## Output layout
 
@@ -212,7 +226,8 @@ The interesting parts (and the traps) are documented in
 - **Term auto-mapping is institution-specific** — see above.
 - **Rotating terms need config.** A new academic year means new term IDs; if
   `--dry-run` shows `未分类/`, add the new mapping.
-- **No incremental sync.** Re-running a finished course is skipped entirely; use
+- **Full mode (without `--update`) is not incremental.** Re-running a finished course is
+  skipped entirely; use `--update` for incremental, or
   `--force` to re-fetch it (which deletes and re-downloads the whole course folder).
   A `homework/` subfolder is the one exception: it is left alone, on the assumption
   that anything you put in there is yours and not something the crawler downloaded.

@@ -61,6 +61,7 @@ python bb_crawler.py --course _12345_1   # 只跑一门课（可重复指定）
 python bb_crawler.py --force             # 清空该课目录后重新下载（保留 homework/ 子目录）
 python bb_crawler.py --update            # 增量：只下载新增/被修改的内容
 python bb_crawler.py --update --dry-run  # 预览 --update 会下载什么
+python bb_crawler.py --clean-profile     # 清理浏览器 profile（保留登录态）
 ```
 
 **务必先跑 `--dry-run`**。它会显示每门课将被放进哪个文件夹而不下载任何东西 ——
@@ -127,7 +128,18 @@ schtasks /create /tn BB_WeeklyUpdate ^
 - 要勾上「如果任务已在运行，则不启动新实例」。爬虫自身也加了 `.crawl.lock` 做同样的防护 ——
   两个实例会互相杀掉对方的浏览器（启动时会杀掉占用该 profile 的所有 msedge）。
 
-报告写在 `reports/update_YYYY-MM-DD.md` 和 `reports/latest-update.md`。
+报告写在 `reports/update_YYYY-MM-DD.md` 和 `reports/latest-update.md`，而且**每次运行**
+都会写一份 —— 包括以退出码 2/1 结束的那种。报告缺失或日期很旧，意味着任务压根没启动，
+不是「没有变化」。每条记录是下面之一：
+
+| 标记 | 含义 |
+|---|---|
+| 新增 / 已修改 / 位置变更 | 已抓取并落盘 |
+| 补访 | 回访一次以补上缺失的落盘记录 |
+| ⚠️ 本次没拿到 | 发现了但没取到，**不记入快照**，下次自动重试 |
+| ❓ 需人工确认 | 既没有可下载附件、也没有正文的条目 |
+
+⚠️ 那几行才是要看的：它们是爬虫唯一知道自己漏了东西的情况。
 
 ## 产物结构
 
@@ -194,7 +206,8 @@ schtasks /create /tn BB_WeeklyUpdate ^
 - **只支持 BlackBoard Classic**。Ultra 的 DOM 和接口完全不同。
 - **学期自动映射是机构相关的** —— 见上。
 - **新学期要补配置**。新学年意味着新的 term ID；`--dry-run` 出现 `未分类/` 就说明该补了。
-- **没有增量同步**。已完成的课会整门跳过；要重取用 `--force`（会删掉并重下整个课程文件夹）。
+- **全量模式（不带 `--update`）不做增量**。已完成的课整门跳过；增量用 `--update`，
+  要重取用 `--force`（会删掉并重下整个课程文件夹）。
   唯一的例外是 `homework/` 子目录：它会被保留，因为默认假设放进那里的是你自己的东西、
   不是爬虫下的。如果你习惯用别的目录名放自己的文件，`--force` 之前先把那个名字加进
   `bb_crawler.py` 顶部的 `KEEP_ON_FORCE`。

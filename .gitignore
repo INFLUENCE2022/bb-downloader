@@ -12,9 +12,11 @@
 .crawl_status.json
 .content_snapshot.json
 .content_snapshot.json.tmp
+.crawl.lock
 .tmp_dl/
 logs/
 *.log
+.bak_*/
 
 # 增量更新报告（含课程名，属个人信息）
 reports/
@@ -27,3 +29,6 @@ configs/term_map.json
 # Python
 __pycache__/
 *.pyc
+
+# 本地会话记录
+_sessions/
