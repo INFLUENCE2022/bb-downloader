@@ -21,10 +21,12 @@ logs/
 # 增量更新报告（含课程名，属个人信息）
 reports/
 
-# 本地真实配置（含自己学校的 base_url / 学期 ID，不入库）
+# 本地真实配置（含自己学校的 base_url / 学期 ID / 真实课程名单，不入库）
 # 提交的是同目录下的 *.example.json 模板
 configs/paths.json
 configs/term_map.json
+configs/courses.json
+configs/courses.json.tmp
 
 # Python
 __pycache__/

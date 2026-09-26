@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to courses.json to take effect (that file is gitignored, because it names your real courses). Courses listed under `exclude` are NOT downloaded; every other course, including ones that appear later, IS. Delete the file to download everything again. Maintain it with `python bb_crawler.py --select`, or edit by hand.",
+  "exclude": {
+    "_00000_1": "EXAMPLE101:Introduction to Something You Do Not Need_L01"
+  }
+}

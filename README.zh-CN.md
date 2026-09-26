@@ -61,6 +61,8 @@ python bb_crawler.py --course _12345_1   # 只跑一门课（可重复指定）
 python bb_crawler.py --force             # 清空该课目录后重新下载（保留 homework/ 子目录）
 python bb_crawler.py --update            # 增量：只下载新增/被修改的内容
 python bb_crawler.py --update --dry-run  # 预览 --update 会下载什么
+python bb_crawler.py --select            # 勾选要下载哪些课程
+python bb_crawler.py --exclude _12345_1  # 本次跳过一门课（不改配置文件）
 python bb_crawler.py --clean-profile     # 清理浏览器 profile（保留登录态）
 ```
 
@@ -100,6 +102,39 @@ python bb_crawler.py --clean-profile     # 清理浏览器 profile（保留登�
 
 **第一次跑**：某门课已经下过但还没有快照时，爬虫会**建立种子快照、不下载任何东西** ——
 但会补下「该课上次抓取之后被改动过」的内容。所以首次 `--update` 很便宜，也不会重下已有的归档。
+
+## 选择下载哪些课程
+
+```
+python bb_crawler.py --select
+```
+
+会列出账号下的全部课程并编号，问你想要哪些：
+
+```
+   1. [✓] 2025年下学期 / CS101:程序设计基础_L01
+   2. [ ] 2025年下学期 / GEN200:通识选修_L04
+   ...
+  输入要下载的编号，逗号分隔，支持区间（例：1,3,5-7）
+  回车 = 放弃；all = 全部下载；none = 全部不下载
+  >
+```
+
+它把**补集**写进 `configs/courses.json` —— 也就是你没勾的那些，格式是 `course_id: 课程名`。
+三个要知道的后果：
+
+- **新出现的课程默认会被下载。** 文件记的是"跳过什么"，所以下学期新开一门课不需要你做什么
+  就会自动抓。反过来存白名单的话，新课会静默地永远不下，而你唯一的症状是一个你从没想过去看的空文件夹。
+- **磁盘上什么都不会删。** 取消勾选只是停止后续下载，原来的文件夹原样留着。以后重新勾上，
+  靠快照就只补这段期间的变动。
+- **计划任务也认这个选择**，因为它在文件里而不是在终端里。这正是它必须是个文件的原因。
+
+`--exclude <course_id>` 只对本次运行跳过某门课，不改文件。`--course <course_id>` 相反：
+**只**跑这几门，且优先于已保存的名单。`--dry-run` 会显示每门课当前的状态
+（`[已排除，不下载]`）和它的 `course_id`，ID 从那里复制。
+
+文件就是普通 JSON，可以直接手改（写成纯 ID 列表也认）。删掉它 = 全部下载。
+它被 gitignore 排除，因为里面有你的真实课程名；入库的是模板 `configs/courses.example.json`。
 
 ## 定时运行
 
@@ -162,6 +197,7 @@ schtasks /create /tn BB_WeeklyUpdate ^
 │   ├── update_2026-01-01.md            # 每次增量运行的报告
 │   └── latest-update.md                # 最新一份的快捷入口
 ├── configs/paths.json                  # 你的配置（已 gitignore）
+├── configs/courses.json                # 不下载哪些课程（已 gitignore，见 --select）
 └── .edge_profile/                      # 浏览器 profile（已 gitignore）
 ```
 
@@ -170,9 +206,10 @@ schtasks /create /tn BB_WeeklyUpdate ^
 | 文件 | 内容 |
 |---|---|
 | `_作业清单.md` | 每门课的作业索引：标题、路径、附件数 |
-| `_未识别条目.md` | 脚本没处理的条目类型 —— **出现了一定要看** |
+| `_未识别条目.md` | 既没有可下载附件、也没有正文的条目 —— **出现了一定要看** |
 | `_外链.md` | 外链 URL，一行一个 |
-| `<作业名>_作业要求.md` | 作业说明正文，仅在页面确实有文字时才生成 |
+| `<条目名>.md` | 正文型条目（没有附件的那种）的正文 |
+| `<作业名>_作业要求.md` | 作业说明正文，在作业既有正文又有附件时才生成 |
 
 ## 学期映射
 
@@ -220,7 +257,9 @@ schtasks /create /tn BB_WeeklyUpdate ^
 | `缺少配置文件` | `cp configs/paths.example.json configs/paths.json` 并填写 |
 | 卡在登录提示 | 在弹出的浏览器窗口里登录；太慢就调大 `login_timeout` |
 | 课程落到 `未分类/` | 补 `configs/term_map.json` |
-| `_未识别条目.md` 非空 | 出现了脚本没处理的条目类型，对照结构文档里的类型表补分支 |
+| `_未识别条目.md` 非空 | 这些条目既没有可下载附件、也没有正文。通常是老师建了还没填内容的空条目；有内容后这个文件会自己消失 |
+| 某门课一直不下载 | 查 `configs/courses.json`，那是排除名单。`--dry-run` 会给这些行标上 `[已排除，不下载]` |
+| `--select` 拒绝运行 | 它需要可交互的终端。改用 `--exclude <course_id>` 或直接编辑 `configs/courses.json` |
 | 中文输出乱码 | 脚本已强制 UTF-8 stdout，检查终端编码 |
 | 端口被占 | 脚本会杀掉占用该 profile 的进程并等端口释放 |
 

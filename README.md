@@ -62,6 +62,8 @@ python bb_crawler.py --force             # wipe that course's folder and re-down
                                          # (keeps a `homework/` subfolder if you have one)
 python bb_crawler.py --update            # incremental: fetch only new/changed content
 python bb_crawler.py --update --dry-run  # preview what --update would fetch
+python bb_crawler.py --select            # pick which courses to download
+python bb_crawler.py --exclude _12345_1  # skip one course for this run only
 python bb_crawler.py --clean-profile     # trim the browser profile (keeps the session)
 ```
 
@@ -111,6 +113,45 @@ content file), which is the cost this mode exists to avoid.
 the crawler *seeds* the snapshot without downloading anything — but it still fetches
 anything modified since that course was last crawled. So the first `--update` is cheap,
 and it will not re-download an existing archive.
+
+## Choosing which courses to download
+
+```
+python bb_crawler.py --select
+```
+
+lists every course on the account with a number, and asks which ones you want:
+
+```
+   1. [✓] 2026 Fall / CS101:Introduction to Programming_L01
+   2. [ ] 2026 Fall / GEN200:General Education Elective_L04
+   ...
+   Type the numbers you want, comma separated, ranges allowed (e.g. 1,3,5-7)
+   Enter = cancel; all = download everything; none = download nothing
+  >
+```
+
+It writes the **complement** to `configs/courses.json` — the courses you did *not*
+pick, as a list of `course_id: name`. Three consequences worth knowing:
+
+- **New courses are downloaded by default.** The file records what to skip, so a
+  course that appears next semester is fetched without you doing anything. An
+  allowlist would silently never download it, and the only symptom would be an
+  empty folder you never thought to look at.
+- **Nothing on disk is deleted.** Un-picking a course just stops future downloads;
+  its folder stays where it is. Pick it again and the snapshot means you only get
+  what changed while you were away.
+- **It applies to scheduled runs too**, because it lives in a file rather than in
+  the terminal. That is the whole reason it is a file.
+
+`--exclude <course_id>` skips a course for a single run without touching the file.
+`--course <course_id>` does the opposite: it runs *only* those courses, and takes
+precedence over the saved list. `--dry-run` shows the current state of every course
+(`[已排除，不下载]`) along with its `course_id`, which is where you copy IDs from.
+
+The file is plain JSON and safe to edit by hand (a bare list of IDs works too).
+Deleting it means "download everything". It is gitignored, because it names your
+real courses; `configs/courses.example.json` is the committed template.
 
 ## Running it on a schedule
 
@@ -178,6 +219,7 @@ is missing something.
 │   ├── update_2026-01-01.md            # per-run incremental report
 │   └── latest-update.md                # shortcut to the newest one
 ├── configs/paths.json                  # your config (gitignored)
+├── configs/courses.json                # courses to skip (gitignored; see --select)
 └── .edge_profile/                      # browser profile (gitignored)
 ```
 
@@ -187,9 +229,10 @@ Markdown and safe to ignore or rename:
 | File | Contents |
 |---|---|
 | `_作业清单.md` | Per-course assignment index: title, path, attachment count |
-| `_未识别条目.md` | Content types the crawler did not handle — **check this if it appears** |
+| `_未识别条目.md` | Items with nothing downloadable and no body text — **check this if it appears** |
 | `_外链.md` | External URLs, one per line |
-| `<name>_作业要求.md` | Assignment instructions, written only when the page has real text |
+| `<name>.md` | Body of a text-type content item (an item with no attachment) |
+| `<name>_作业要求.md` | Assignment instructions, when the assignment has both a body and attachments |
 
 ## Term mapping
 
@@ -243,7 +286,9 @@ The interesting parts (and the traps) are documented in
 | `缺少配置文件` / missing config | `cp configs/paths.example.json configs/paths.json` and fill it in |
 | Stuck at the login prompt | Log in in the opened browser window; raise `login_timeout` if slow |
 | Courses land in `未分类/` | Fill in `configs/term_map.json` |
-| `_未识别条目.md` is non-empty | A content type the crawler doesn't handle — see the type table in the structure doc |
+| `_未识别条目.md` is non-empty | Those items have no downloadable attachment and no body text. Usually an empty item the instructor created but hasn't filled in; the file disappears by itself once it has content |
+| A course is never downloaded | Check `configs/courses.json` — it is the skip list. `--dry-run` marks rows with `[已排除，不下载]` |
+| `--select` refuses to run | It needs an interactive terminal. Use `--exclude <course_id>` or edit `configs/courses.json` |
 | Garbled non-ASCII output | The script forces UTF-8 stdout; check your terminal encoding |
 | Port already in use | The script kills processes holding that profile and waits for the port |
 

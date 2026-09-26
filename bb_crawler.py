@@ -47,6 +47,7 @@ from DrissionPage._functions.tools import port_is_using
 BASE = Path(__file__).resolve().parent
 CONFIG_PATH = BASE / 'configs' / 'paths.json'
 TERM_MAP_PATH = BASE / 'configs' / 'term_map.json'
+COURSES_PATH = BASE / 'configs' / 'courses.json'
 STATUS_PATH = BASE / '.crawl_status.json'
 SNAPSHOT_PATH = BASE / '.content_snapshot.json'
 LOG_DIR = BASE / 'logs'
@@ -105,6 +106,145 @@ def load_term_map() -> dict:
     if not TERM_MAP_PATH.exists():
         return {}
     return json.loads(TERM_MAP_PATH.read_text(encoding='utf-8'))
+
+
+def load_excluded() -> dict:
+    """读「不下载」名单：{course_id: 课程名}。
+
+    存的是排除名单而不是白名单，因为要**让新出现的课程默认被下载**。换成白名单的话，
+    下学期新开一门课不在名单里，它会静默地永远不下 —— 而且没有任何信号，正是这个
+    项目最该避免的那类故障。文件不存在 = 不排除任何课程。
+    """
+    if not COURSES_PATH.exists():
+        return {}
+    try:
+        data = json.loads(COURSES_PATH.read_text(encoding='utf-8'))
+    except Exception as e:
+        log(f'[选课] configs/courses.json 解析失败（{e}），本次按「不排除」处理')
+        return {}
+    raw = data.get('exclude')
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    if isinstance(raw, list):           # 允许手写成纯 id 列表
+        return {str(k): '' for k in raw}
+    return {}
+
+
+def save_excluded(excluded: dict) -> None:
+    """原子写，理由同快照：写到一半被关机截断会丢名单。"""
+    COURSES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        '_comment': '不下载这些课程。不在此列的（包括以后新出现的）都会被下载。'
+                    '用 `python bb_crawler.py --select` 维护，也可以手工编辑。'
+                    '删掉本文件 = 全部下载。',
+        'exclude': {k: v for k, v in sorted(excluded.items())},
+    }
+    tmp = COURSES_PATH.with_name(COURSES_PATH.name + '.tmp')
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(tmp, COURSES_PATH)
+
+
+def parse_pick(line: str, n: int) -> list[int] | None:
+    """把 "1,3,5-7" 解析成 0 基下标。无法理解或越界返回 None（调用方重问）。"""
+    toks = line.replace('，', ',').replace('、', ',').split(',')
+    picks: list[int] = []
+    for tok in toks:
+        tok = tok.strip()
+        if not tok:
+            continue
+        span = re.fullmatch(r'(\d+)\s*[-~至]\s*(\d+)', tok)
+        if span:
+            a, b = int(span.group(1)), int(span.group(2))
+            picks.extend(range(min(a, b), max(a, b) + 1))
+        elif tok.isdigit():
+            picks.append(int(tok))
+        else:
+            return None
+    if not picks or any(not (1 <= p <= n) for p in picks):
+        return None
+    return sorted({p - 1 for p in picks})
+
+
+def enumerate_courses(page: ChromiumPage, cfg: dict, term_map: dict) -> list[dict]:
+    """枚举账号下全部课程并解析出学期文件夹。--select 与主流程共用。"""
+    terms = list_terms(page)
+    plan = []
+    for c in list_courses(page):
+        cid = c['courseId']
+        name = (c.get('course') or {}).get('name') or cid
+        tid = (c.get('course') or {}).get('termId') or ''
+        tname = (terms.get(tid) or {}).get('name') or ''
+        plan.append({'courseId': cid, 'name': name, 'term_id': tid,
+                     'term_name': tname, 'folder': term_to_folder(tid, tname, term_map),
+                     'raw': c})
+    return plan
+
+
+def run_select(page: ChromiumPage, cfg: dict, term_map: dict) -> None:
+    """列出全部课程让用户挑要下载的，把其余写进排除名单。
+
+    问的是「你要哪些」，存的是「其余不要」—— 两个方向都不冲突：存补集仍然保证
+    新课默认被下载，而人思考的方向是「我想要这几门」。
+    """
+    plan = enumerate_courses(page, cfg, term_map)
+    excluded = load_excluded()
+    n = len(plan)
+
+    while True:
+        print()
+        print(f'  共 {n} 门课程。已下载的文件不会因为不选而被删除。')
+        print()
+        for i, p in enumerate(plan, 1):
+            mark = ' ' if p['courseId'] in excluded else '✓'
+            print(f'  {i:2d}. [{mark}] {p["folder"]} / {p["name"]}')
+        print()
+        print('  输入要下载的编号，逗号分隔，支持区间（例：1,3,5-7）')
+        print('  回车 = 放弃；all = 全部下载；none = 全部不下载')
+        try:
+            line = input('  > ')
+        except (EOFError, KeyboardInterrupt):
+            print()
+            log('[选课] 已取消，未做任何修改')
+            return
+        low = line.strip().lower()
+        if not low:
+            log('[选课] 已取消，未做任何修改')
+            return
+        if low == 'all':
+            keep = set(range(n))
+        elif low == 'none':
+            keep = set()
+        else:
+            idx = parse_pick(line, n)
+            if idx is None:
+                print('  ! 没看懂，请重新输入（例：1,3,5-7）')
+                continue
+            keep = set(idx)
+        break
+
+    new_excluded = {p['courseId']: p['name'] for i, p in enumerate(plan) if i not in keep}
+    added = [c for c in new_excluded if c not in excluded]
+    removed = [c for c in excluded if c not in new_excluded]
+
+    print()
+    print(f'  将下载 {len(keep)} 门，不下载 {len(new_excluded)} 门。')
+    for c in added:
+        print(f'    + 不再下载  {new_excluded[c]}')
+    for c in removed:
+        print(f'    - 恢复下载  {excluded.get(c) or c}')
+    if not added and not removed:
+        print('    （与当前设置相同）')
+    print('  以后新出现的课程默认会下载；不想要的再跑一次 --select 加进来。')
+
+    try:
+        ans = input('\n  写入 configs/courses.json？[y/N] ').strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = ''
+    if ans not in ('y', 'yes'):
+        log('[选课] 已取消，未做任何修改')
+        return
+    save_excluded(new_excluded)
+    log(f'[选课] 已写入 {COURSES_PATH}：下载 {len(keep)} 门，不下载 {len(new_excluded)} 门')
 
 
 def log(msg: str) -> None:
@@ -853,14 +993,19 @@ def load_status() -> dict:
     return {'per_course': {}}
 
 
-def save_status(status: dict, courses_total: int) -> None:
-    """落盘状态。完成数只统计本次计划内的课程（--course 单跑时不会被历史成绩干扰）。"""
-    scope = status.get('_all_ids') or list(status['per_course'])
+def save_status(status: dict) -> None:
+    """落盘状态。完成数只统计本次计划内的课程（--course 单跑时不会被历史成绩干扰）。
+
+    分母取 `_active_ids`（全部课程减去已排除的）—— 用 `_all_ids` 的话，排除了两门
+    就永远显示「9/11」，看起来像每次都有两门失败。
+    """
+    scope = (status.get('_active_ids') or status.get('_all_ids')
+             or list(status['per_course']))
     done = [i for i in scope if status['per_course'].get(i, {}).get('ok')]
     names = status.get('_names') or {}
     status.update({
         'finished_at': f'{datetime.now():%Y-%m-%d %H:%M:%S}',
-        'courses_total': courses_total,
+        'courses_total': len(scope),
         'courses_done': len(done),
         'courses_remaining': [names.get(i, i) for i in scope if i not in done],
     })
@@ -1085,10 +1230,19 @@ def main() -> None:
                     help='增量：只下载新增/被修改的内容（按 BB 的 modified 时间戳比对）')
     ap.add_argument('--clean-profile', action='store_true',
                     help='清掉浏览器 profile 里的缓存/遥测垃圾（保留登录态），不下载')
+    ap.add_argument('--select', action='store_true',
+                    help='列出全部课程，勾选要下载的，其余写进 configs/courses.json')
+    ap.add_argument('--exclude', action='append', default=None,
+                    help='本次额外不下载的 course_id（可重复；只影响本次，不改配置文件）')
     args = ap.parse_args()
 
     if args.update and args.force:
         raise SystemExit('--update 与 --force 互斥：前者只下增量，后者清空重下全量。请二选一。')
+
+    if args.select and not sys.stdin.isatty():
+        # 无人值守的场景绝不能走到 input() 上：那会把计划任务挂到超时为止
+        raise SystemExit('--select 需要一个能交互的终端。无人值守请改用 --exclude '
+                         '<course_id>，或直接编辑 configs/courses.json。')
 
     cfg = load_config()
     term_map = load_term_map()
@@ -1108,32 +1262,53 @@ def main() -> None:
         log(f'[浏览器] 已启动 (port {cfg["port"]})')
         ensure_logged_in(page, cfg['base_url'], cfg.get('login_timeout', 240))
 
-        terms = list_terms(page)
-        courses = list_courses(page)
-        log(f'[课程] 共 {len(courses)} 门')
+        if args.select:
+            log('[选课] 列课程中...')
+            run_select(page, cfg, term_map)
+            return
 
-        # 组装计划
-        plan = []
-        for c in courses:
-            cid = c['courseId']
-            cname = (c.get('course') or {}).get('name') or cid
-            tid = (c.get('course') or {}).get('termId') or ''
-            tname = (terms.get(tid) or {}).get('name') or ''
-            folder = term_to_folder(tid, tname, term_map)
-            plan.append({'courseId': cid, 'name': cname, 'term_id': tid,
-                         'term_name': tname, 'folder': folder, 'raw': c})
+        plan = enumerate_courses(page, cfg, term_map)
+        log(f'[课程] 共 {len(plan)} 门')
 
         plan_all = plan  # 全量清单：状态文件始终按全量记录，不受 --course 过滤影响
+        excluded = load_excluded()
+        active = [p for p in plan_all if p['courseId'] not in excluded]
+        stale = [c for c in excluded if c not in {p['courseId'] for p in plan_all}]
+        if stale:
+            # 名单越积越多的唯一代价就是这里会一直提醒，所以顺手报出来
+            log(f'[选课] 排除名单里有 {len(stale)} 门已不在账号下：'
+                + '、'.join(excluded.get(c) or c for c in stale))
+        # --course 是显式指定，优先于排除名单
         if args.course:
             plan = [p for p in plan_all if p['courseId'] in set(args.course)]
+        else:
+            plan = active
+        if args.exclude:
+            drop = set(args.exclude)
+            log(f'[选课] 本次另外排除 {len(drop)} 门（不改配置文件）')
+            plan = [p for p in plan if p['courseId'] not in drop]
 
         # 学期映射总览（dry-run 时尤其重要）
         log('')
         log('=== 课程 → 学期映射 ===')
-        for p in sorted(plan, key=lambda x: (x['folder'], x['name'])):
+        forced = set(args.course or ())
+        dropped = set(args.exclude or ())
+        for p in sorted(plan_all, key=lambda x: (x['folder'], x['name'])):
             cur = '✓' if (status['per_course'].get(p['courseId'], {}).get('ok')
                           and not args.force) else ' '
-            log(f'  [{cur}] {p["folder"]} / {p["name"]}   (term={p["term_name"] or "?"})')
+            # 标记顺序 = 实际生效顺序：--exclude > --course > 配置文件
+            if p['courseId'] in dropped:
+                tail = '  [本次排除]'
+            elif p['courseId'] in forced:
+                tail = '  [本次指定，强制下载]'
+            elif p['courseId'] in excluded:
+                tail = '  [已排除，不下载]'
+            else:
+                tail = ''
+            if args.dry_run:
+                tail += f'  (id={p["courseId"]})'
+            log(f'  [{cur}] {p["folder"]} / {p["name"]}   '
+                f'(term={p["term_name"] or "?"}){tail}')
         log('')
 
         snap = load_snapshot() if args.update else None
@@ -1148,6 +1323,7 @@ def main() -> None:
             return
 
         status['_all_ids'] = [p['courseId'] for p in plan_all]
+        status['_active_ids'] = [p['courseId'] for p in active]
         status['_names'] = {p['courseId']: p['name'] for p in plan_all}
         update_results: list[dict] = []
 
@@ -1232,7 +1408,7 @@ def main() -> None:
                         'name': p['name'], 'folder': p['folder'], 'new': [],
                         'failed': [f'整门课失败：{e}'], 'unknown': []})
             if not args.dry_run:
-                save_status(status, len(plan_all))
+                save_status(status)
 
         if args.dry_run:
             if args.update:
@@ -1246,7 +1422,7 @@ def main() -> None:
             log(f'[报告] {path}')
 
         status['status'] = 'all_done'
-        save_status(status, len(plan_all))
+        save_status(status)
         done_here = sum(1 for p in plan
                         if status['per_course'].get(p['courseId'], {}).get('ok'))
         log('')
@@ -1260,19 +1436,19 @@ def main() -> None:
     except RuntimeError as e:
         # ensure_logged_in 超时走这里 —— 无人值守时唯一需要人工介入的情况
         status['status'] = 'error'
-        save_status(status, status.get('courses_total', 0))
+        save_status(status)
         log(f'\n[需要人工登录] {e}')
         _report_failure(f'需要人工登录。{e}')
         sys.exit(2)
     except KeyboardInterrupt:
         status['status'] = 'interrupted'
-        save_status(status, status.get('courses_total', 0))
+        save_status(status)
         log('\n[中断] 已保存进度，重跑将从断点继续')
         _report_failure('被手动中断')
         sys.exit(1)
     except Exception as e:
         status['status'] = 'error'
-        save_status(status, status.get('courses_total', 0))
+        save_status(status)
         log(f'\n[错误] {e}')
         _report_failure(f'{type(e).__name__}: {e}')
         sys.exit(1)
