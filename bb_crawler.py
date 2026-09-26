@@ -990,7 +990,14 @@ def _write_report_files(text: str) -> Path:
     now = datetime.now()
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     dated = REPORT_DIR / f'update_{now:%Y-%m-%d}.md'
-    dated.write_text(text, encoding='utf-8')
+    if dated.exists():
+        # 同一天再跑（手动补跑、或计划任务之后又跑了一次）要追加而不是覆盖：
+        # 一次「59 项补访」的记录不该被紧跟着的一次空跑抹掉 —— 当天实际发生过什么，
+        # 日期文件就是那天的账本。
+        with dated.open('a', encoding='utf-8') as fh:
+            fh.write('\n---\n\n' + text)
+    else:
+        dated.write_text(text, encoding='utf-8')
     (REPORT_DIR / 'latest-update.md').write_text(text, encoding='utf-8')
     return dated
 
