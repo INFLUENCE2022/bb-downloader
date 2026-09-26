@@ -1,14 +1,21 @@
 @echo off
 REM ============================================================
-REM BB 增量更新 —— 由 Windows 计划任务 BB_WeeklyUpdate 触发
-REM （每周六、周日 20:00，见 README 的「定时任务」一节）
+REM BB incremental update - started by the Windows task BB_WeeklyUpdate
+REM (Saturday and Sunday 20:00; see the scheduled-task section of the README)
 REM
-REM 只下载新增/被修改的内容；没有新内容时也会写一份报告。
-REM 退出码：0=成功 1=其他错误 2=需要人工登录 3=有下载失败 4=已有实例在跑
-REM 注意：本脚本默认只在你登录 Windows 时才会被任务计划唤起。
+REM Downloads only content that is new or changed. Writes a report even when
+REM there is nothing new.
+REM Exit codes: 0=ok 1=unexpected error 2=needs a human to log in
+REM             3=something was found but not retrieved 4=already running
+REM
+REM Comments here are ASCII on purpose: cmd.exe reads this file in the OEM code
+REM page, so non-ASCII comments are mis-decoded and the fragments get executed
+REM as commands. Keep this file ASCII.
 REM ============================================================
 cd /d "%~dp0.."
 
+REM Whatever `python` resolves to on PATH. Point this at an absolute interpreter
+REM path if the machine has more than one.
 set PY=python
 set LOG=logs\update.log
 if not exist logs mkdir logs
